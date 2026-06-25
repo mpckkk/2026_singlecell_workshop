@@ -1,0 +1,116 @@
+DO ALL OF THIS:
+# Pipeline Prompt — Joint Bulk + Single-Cell RNA-seq Analysis of the *Arabidopsis* Root
+
+> Paste everything below the line into your coding/bioinformatics agent (or use it as your own analysis plan). It is self-contained.
+
+---
+
+## ROLE
+You are a bioinformatics analysis agent. Build and run a reproducible, end-to-end pipeline that **analyzes bulk RNA-seq and single-cell RNA-seq from the *Arabidopsis thaliana* root and interprets the two modalities together.**
+
+## SCIENTIFIC QUESTION (this is the goal — keep answering it throughout)
+**Interpreting bulk RNA-seq and single-nuclei/cell RNA-seq together in *Arabidopsis*.** Concretely, answer:
+1. **Which root cell type(s) contribute to the bulk expression signal?** (deconvolution)
+2. **Which genes behave similarly (co-express) across both datasets?** (cross-modality concordance)
+3. **How do the single-cell developmental trajectories relate to the bulk expression profile?**
+
+Reference study: Denyer et al. (2019) *Developmental Cell* — "Spatiotemporal Developmental Trajectories in the Arabidopsis Root Revealed Using High-Throughput Single-Cell RNA Sequencing." GEO accession **GSE123818**.
+
+## DATA — use EXACTLY two files from GSE123818
+Download both from `https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE123818` (Supplementary files):
+1. **Single-cell, wild-type count matrix** → `GSE123818_Root_single_cell_wt_datamatrix.csv.gz` (genes × cells).
+2. **Bulk RNA-seq count matrix** → the bulk `*_datamatrix.csv.gz` file in the same series (genes × samples). *Confirm the exact filename on the GEO page.*
+
+**Do NOT load** `GSE123818_Root_single_cell_shr_datamatrix.csv.gz` (the *shr* mutant single-cell file) — it is out of scope.
+
+Notes on the matrices:
+- Gene identifiers are *Arabidopsis* AGI locus IDs (e.g., `AT3G11260`). Use these as the common key to match bulk ↔ single-cell.
+- Verify orientation on load (genes should be rows); transpose if needed.
+- Organellar genes use prefixes `ATMG*` (mitochondrial) and `ATCG*` (chloroplast) — needed for QC.
+
+## ENVIRONMENT
+- **Python:** `scanpy`, `anndata`, `scvi-tools`, `leidenalg`, `python-igraph`, `numpy`, `pandas`, `scipy`, `matplotlib`, `seaborn`.
+- **R:** `Seurat`, `DESeq2`, `BisqueRNA`, `Biobase`, `ggplot2`, `pheatmap`, `WGCNA` (optional).
+- **R ↔ Python bridge:** exchange objects as `.h5ad` (via `SeuratDisk`/`anndata`) so the same single-cell object is reused across Seurat, Scanpy (PAGA), and scvi-tools.
+- Set a global random seed; save `sessionInfo()` / `pip freeze` for reproducibility.
+
+---
+
+# PIPELINE
+
+## Phase 0 — Setup & input QC
+- Download and decompress both files; load into memory.
+- Report for each: dimensions, gene-ID format, % sparsity, and the set of genes shared between bulk and single-cell.
+- Create an output structure: `figures/`, `tables/`, `objects/`.
+
+## Phase 1 — Single-cell processing (Seurat)
+1. Build a Seurat object from the WT matrix.
+2. **QC & filtering:** compute `nFeature_RNA`, `nCount_RNA`, and % organellar reads (`ATMG*` + `ATCG*`); filter low-quality cells and likely doublets using reasonable thresholds (state them).
+3. **Normalize** (`SCTransform` or `LogNormalize`), find highly variable genes, scale, run **PCA**.
+4. **Cluster** (`FindNeighbors` → `FindClusters`) and compute **UMAP**.
+5. **Markers:** `FindAllMarkers` per cluster.
+6. **Annotate clusters to known root cell types** using canonical *Arabidopsis* root markers (and the marker sets in Denyer et al. 2019). Representative markers to use (map symbols → AGI IDs as needed):
+   - QC: *WOX5* (AT3G11260)
+   - Endodermis: *SCR* (AT3G54220), *SHR* (AT4G37650), *MYB36*, *CASP1*
+   - Cortex: *CO2*/*PEP*, cortex-specific markers
+   - Trichoblast / root hair: *COBL9* (AT5G49270), *EXP7* (AT1G69530), *RHD6*, *ADF8*
+   - Atrichoblast / non-hair epidermis: *GL2* (AT1G79840)
+   - Phloem: *APL* (AT1G79430), *SUC2*, *S17*
+   - Xylem: *VND7*, *XCP1*, *IRX* genes
+   - Procambium/stele: *ATHB8* (AT4G32880), *WOL/CRE1*
+   - Columella / lateral root cap: columella + LRC markers
+7. **Single-cell visualizations (per the plan):** UMAP colored by cluster and by annotated cell type; **dot plot** of marker genes across cell types; **violin plots** of key markers.
+8. **Export** an annotated AnnData object (`objects/sc_wt_annotated.h5ad`) containing raw counts, normalized data, cluster labels, cell-type labels, and a per-cell sample/replicate ID (needed later for deconvolution).
+
+## Phase 2 — Trajectory inference (PAGA, Scanpy)
+1. Load `sc_wt_annotated.h5ad` in Scanpy (reuse Seurat HVGs/PCA or recompute neighbors).
+2. Build the neighbors graph; run **PAGA** on cell-type / cluster labels to get connectivity between cell states.
+3. Plot the **PAGA graph**; initialize UMAP from PAGA for a topology-faithful embedding.
+4. (Optional) Compute **diffusion pseudotime (DPT)** rooted at the QC/meristem to order each developmental lineage (epidermis, cortex, endodermis, stele).
+5. **Outputs:** PAGA connectivity plot; pseudotime-colored UMAP; trajectory description per lineage.
+
+## Phase 3 — Bulk RNA-seq processing (DESeq2)
+1. Load the bulk count matrix. **You are starting from a count matrix, so skip alignment/`featureCounts`** — note that STAR/HISAT2 + `featureCounts` would only be required if starting from raw FASTQ/BAM.
+2. Build a `DESeqDataSet`. Define sample metadata (genotype / tissue / timepoint) **if the design supports a contrast**.
+   - If conditions + replicates exist → run differential expression (`DESeq`, `results`).
+   - If the bulk is a single condition / no contrast → use DESeq2 for **normalization + variance-stabilizing transform (VST)** only, and say so.
+3. **Bulk visualizations (per the plan):** **PCA** of samples, sample-distance **heatmap**, **heatmap** of top variable genes, and (if a contrast exists) volcano + DEG heatmap; **dot plots** of selected genes.
+4. **Outputs:** normalized/VST bulk expression table; DE results table (if applicable).
+
+## Phase 4 — Cross-dataset co-expression ("which genes behave similarly in both")
+1. **Pseudobulk the single-cell data:** sum (or mean) counts per cell type and overall → pseudobulk expression matrix.
+2. Restrict to genes shared with bulk; **correlate pseudobulk vs bulk** overall and per cell type — scatter plots + Spearman/Pearson coefficients.
+3. **Co-expression structure:** build gene–gene correlation networks / **WGCNA modules** separately on bulk and on single-cell (pseudobulk or SCT data); compare module membership and identify genes/modules that are consistently co-expressed across both modalities.
+4. **Outputs:** correlation tables, module-overlap comparison, ranked list of cross-modality concordant genes.
+
+## Phase 5 — Integration & deconvolution ("which cell type contributes to bulk signal")
+1. **BisqueRNA (reference-based decomposition — primary method):**
+   - Build a `Biobase::ExpressionSet` from the single-cell data as the **reference**, with `cellType` and `SubjectName`/sample-ID columns.
+   - Build an `ExpressionSet` from the bulk data.
+   - Run `ReferenceBasedDecomposition` to estimate **cell-type proportions per bulk sample**.
+   - Visualize as a **stacked bar plot** of cell-type proportions per bulk sample → this directly answers question (1).
+2. **scVI / scvi-tools:**
+   - Train **scVI** on the single-cell data for a denoised latent representation and batch/sample integration; use **scANVI** if label-aware integration / label transfer is useful.
+   - (Optional cross-check) Use the `scvi-tools` deconvolution ecosystem (e.g., Stereoscope / DestVI-style models) with scVI-derived cell-type signatures to produce a **second proportion estimate**, and compare it against BisqueRNA.
+   - **Outputs:** scVI latent UMAP / integrated embedding; optional second deconvolution estimate; agreement comparison with BisqueRNA.
+
+## Phase 6 — Synthesis, visualization & report
+- Assemble the key figures: cell-type UMAP, PAGA trajectory, bulk PCA + heatmaps, pseudobulk-vs-bulk correlation, and the deconvolution proportion plot.
+- Write a short markdown report (`report.md`) that explicitly answers the three scientific questions, citing the figures/tables.
+- Save all figures (PNG + PDF), all tables (CSV), and processed objects (`.h5ad`, `.rds`).
+
+---
+
+## DELIVERABLES
+- `objects/` — `sc_wt_annotated.h5ad`, scVI model, bulk DESeq object.
+- `tables/` — markers, DE results (if any), pseudobulk↔bulk correlations, co-expression modules, deconvolution proportions.
+- `figures/` — UMAPs, dot/violin plots, PAGA graph, bulk PCA/heatmaps, correlation scatters, deconvolution stacked bars.
+- `report.md` — answers to questions (1)–(3) + reproducibility info (seed, package versions).
+
+## CAVEATS — handle explicitly, do not silently ignore
+- **Gene-ID matching:** intersect bulk and single-cell on AGI IDs before any joint step; report how many genes are shared/dropped.
+- **Organellar contamination:** account for `ATMG*`/`ATCG*` in QC and consider excluding from HVG/clustering.
+- **DEG needs a contrast:** if the bulk has no condition groups, do not fabricate one — use DESeq2 for normalization only.
+- **Deconvolution assumptions:** BisqueRNA works best with several individuals/samples in the reference; report how many are available and flag if limited.
+- **Data identity:** this is single-cell (protoplast) data; the question references "single-nuclei/cell" — describe results as single-cell.
+- **Batch/platform effects:** bulk and single-cell differ in capture; rely on normalized/VST + rank-based correlation for cross-modality comparisons.
