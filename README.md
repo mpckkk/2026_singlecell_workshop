@@ -1,5 +1,5 @@
 # Joint Bulk + Single-Cell RNA-seq Analysis — *Arabidopsis* Root (GSE123818)
-
+![Workflow Overview](image1.png)
 **Reference:** Denyer et al. (2019) *Developmental Cell* | GEO **GSE123818**
 
 ## Reproducibility
